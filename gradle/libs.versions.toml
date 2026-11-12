@@ -1,0 +1,31 @@
+# Version catalog. Updated for an Android application module using
+# Jetpack Compose.
+
+[versions]
+agp = "9.2.0"
+# Kotlin version is needed explicitly now: the Compose compiler is a
+# Kotlin compiler plugin (org.jetbrains.kotlin.plugin.compose) and its
+# version must match the Kotlin version AGP 9's built-in support uses.
+kotlin = "2.1.0"
+coreKtx = "1.19.0"
+activityCompose = "1.10.1"
+composeBom = "2025.02.00"
+lifecycleRuntimeKtx = "2.8.7"
+# Filament-based 3D renderer with Compose support.
+sceneview = "2.3.0"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+androidx-ui = { module = "androidx.compose.ui:ui" }
+androidx-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
+androidx-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+androidx-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+androidx-material3 = { module = "androidx.compose.material3:material3" }
+sceneview = { module = "io.github.sceneview:sceneview", version.ref = "sceneview" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

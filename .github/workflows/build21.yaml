@@ -1,0 +1,56 @@
+name: Android CI & Verification Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  verify-and-build:
+    name: Verify, Test & Build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run Verification & Tests
+        run: ./gradlew check
+
+      - name: Assemble Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: src/app/application/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Archive Reports & Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports-and-logs
+          path: |
+            **/build/reports/
+            **/build/test-results/
+          retention-days: 14
+

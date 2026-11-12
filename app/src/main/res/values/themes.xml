@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Pure Compose app: this only needs to cover the brief window
+         before Compose takes over (launch background, status/nav bar
+         icon contrast), since all real theming lives in ui/theme/Theme.kt. -->
+    <style name="Theme.Test" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
