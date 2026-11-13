@@ -1,0 +1,62 @@
+.
+├── .github
+│   └── workflows
+│       └── build21-locStore.yaml
+├── app
+│   ├── build.gradle.kts
+│   └── src
+│       └── main
+│           ├── AndroidManifest.xml
+│           ├── assets
+│           │   └── models
+│           │       └── demo_shop.glb
+│           ├── kotlin
+│           │   └── org
+│           │       └── example
+│           │           └── test
+│           │               ├── CameraPip.kt
+│           │               ├── data
+│           │               │   ├── ScanStore.kt
+│           │               │   └── Shop.kt
+│           │               ├── HomeScreen.kt
+│           │               ├── Joystick.kt
+│           │               ├── MainActivity.kt
+│           │               ├── Orientation.kt
+│           │               ├── recon
+│           │               │   ├── DepthEstimator.kt
+│           │               │   ├── GlbWriter.kt
+│           │               │   ├── Mesh.kt
+│           │               │   ├── ReconPipeline.kt
+│           │               │   ├── ReconService.kt
+│           │               │   ├── Sfm.kt
+│           │               │   ├── SurfaceNets.kt
+│           │               │   └── VoxelGrid.kt
+│           │               ├── ScanRecorder.kt
+│           │               ├── ScanScreen.kt
+│           │               ├── StoreScreen.kt
+│           │               ├── ui
+│           │               │   └── theme
+│           │               │       ├── Color.kt
+│           │               │       ├── Theme.kt
+│           │               │       └── Type.kt
+│           │               └── wifi
+│           │                   └── WifiScanner.kt
+│           └── res
+│               ├── values
+│               │   ├── strings.xml
+│               │   └── themes.xml
+│               └── xml
+│                   └── file_paths.xml
+├── build.gradle.kts
+├── docs
+│   └── PIPELINE.md
+├── gradle
+│   ├── libs.versions.toml
+│   └── wrapper
+│       ├── gradle-wrapper.jar
+│       └── gradle-wrapper.properties
+├── gradle.properties
+├── gradlew
+├── gradlew.bat
+├── settings.gradle.kts
+└── tree.txt

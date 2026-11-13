@@ -173,7 +173,7 @@ class Sfm(private val files: List<File>, private val k: Intrinsics, private val 
                 val pa = MatOfPoint2f(*m.map { Point(fa.xy[2 * it[0]].toDouble(), fa.xy[2 * it[0] + 1].toDouble()) }.toTypedArray())
                 val pb = MatOfPoint2f(*m.map { Point(fb.xy[2 * it[1]].toDouble(), fb.xy[2 * it[1] + 1].toDouble()) }.toTypedArray())
                 val mask = Mat()
-                var e = Calib3d.findEssentialMat(pa, pb, kMat, Calib3d.RANSAC, 0.999, 1.5, mask)
+                var e = Calib3d.findEssentialMat(pa, pb, kMat, Calib3d.RANSAC, 0.999, 1.5, 1000, mask)
                 if (e.empty()) continue
                 if (e.rows() > 3) e = e.rowRange(0, 3).clone()
                 val rm = Mat(); val tm = Mat()
