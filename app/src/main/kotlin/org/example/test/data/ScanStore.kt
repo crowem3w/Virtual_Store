@@ -11,7 +11,11 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-data class ScanInfo(val id: String, val frames: Int, val dir: File)
+data class ScanInfo(val id: String, val frames: Int, val dir: File) {
+    /** The reconstructed 3D model of this scan (written by the recon pipeline). */
+    val model: File get() = File(dir, "model.glb")
+    val hasModel: Boolean get() = model.exists()
+}
 
 /** Where raw scan captures live: filesDir/scans/<id>/{meta.json, frames.jsonl, frames/0000.jpg ...}. */
 class ScanStore(context: Context) {

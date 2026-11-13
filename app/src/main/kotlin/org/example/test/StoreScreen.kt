@@ -91,7 +91,7 @@ fun StoreScreen(shop: Shop, registry: ShopRegistry, hasCamera: Boolean, onExit: 
             it.scale = Scale(newScale)
             it.position = Position(y = newY)
         }
-        registry.saveTransform(newScale, newY)
+        registry.saveTransform(shop.id, newScale, newY)
     }
 
     Box(Modifier.fillMaxSize()) {

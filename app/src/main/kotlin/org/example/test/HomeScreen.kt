@@ -12,6 +12,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -28,6 +29,7 @@ import org.example.test.data.Shop
 import org.example.test.data.ShopMatch
 import org.example.test.data.ShopRegistry
 import org.example.test.data.WifiAp
+import org.example.test.recon.ReconProgress
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,6 +46,10 @@ fun HomeScreen(
     onScan: () -> Unit,
     onShareScan: (ScanInfo) -> Unit,
     onDeleteScan: (ScanInfo) -> Unit,
+    reconProgress: Map<String, ReconProgress>,
+    onProcessScan: (ScanInfo) -> Unit,
+    onCancelProcess: (ScanInfo) -> Unit,
+    onOpenScan: (ScanInfo) -> Unit,
     importStatus: String?,
     onImport: () -> Unit,
     onRemoveImport: () -> Unit,
@@ -108,15 +114,36 @@ fun HomeScreen(
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Scan your shop", style = MaterialTheme.typography.titleMedium)
-                        Text("Walk slowly through the shop while the app records sharp keyframes, phone orientation and the Wi-Fi fingerprint.")
+                        Text("Walk slowly through the shop (move around, don't just turn on the spot) while the app records sharp keyframes. Then tap Process to 3D: it builds a .glb you can open in the store. Keep the phone charging; it takes several minutes.")
                         Button(onClick = onScan, enabled = hasCamera) {
                             Text(if (hasCamera) "Start new scan" else "Camera permission needed")
                         }
                         scans.forEach { info ->
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${info.id} · ${info.frames} frames", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                                TextButton(onClick = { onShareScan(info) }) { Text("Share") }
-                                TextButton(onClick = { onDeleteScan(info) }) { Text("Delete") }
+                            val p = reconProgress[info.id]
+                            val running = p != null && !p.done && p.error == null
+                            Column(Modifier.fillMaxWidth()) {
+                                Text(
+                                    "${info.id} · ${info.frames} frames" + if (info.hasModel) " · 3D model ready" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                if (running) {
+                                    Text("${p!!.stage} (${(p.fraction * 100).toInt()}%)", style = MaterialTheme.typography.bodySmall)
+                                    LinearProgressIndicator(progress = { p.fraction }, modifier = Modifier.fillMaxWidth())
+                                } else if (p?.error != null) {
+                                    Text("Processing failed: ${p.error}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (running) {
+                                        TextButton(onClick = { onCancelProcess(info) }) { Text("Cancel") }
+                                    } else {
+                                        if (info.hasModel) TextButton(onClick = { onOpenScan(info) }) { Text("Open in store") }
+                                        TextButton(onClick = { onProcessScan(info) }, enabled = info.frames >= 8) {
+                                            Text(if (info.hasModel) "Reprocess" else "Process to 3D")
+                                        }
+                                        TextButton(onClick = { onShareScan(info) }) { Text("Share") }
+                                        TextButton(onClick = { onDeleteScan(info) }) { Text("Delete") }
+                                    }
+                                }
                             }
                         }
                     }

@@ -69,9 +69,25 @@ class ShopRegistry(context: Context) {
         prefs.edit().remove(KEY_SCALE).remove(KEY_Y).apply()
     }
 
-    fun saveTransform(scale: Float, yOffset: Float) {
-        prefs.edit().putFloat(KEY_SCALE, scale).putFloat(KEY_Y, yOffset).apply()
+    /** Saves the "Adjust model" scale/height for a shop. The demo/imported model keeps its original keys. */
+    fun saveTransform(shopId: String, scale: Float, yOffset: Float) {
+        val e = prefs.edit()
+        if (shopId == "demo") e.putFloat(KEY_SCALE, scale).putFloat(KEY_Y, yOffset)
+        else e.putFloat("scale_$shopId", scale).putFloat("y_$shopId", yOffset)
+        e.apply()
     }
+
+    /** A shop backed by a scan's own reconstructed .glb (already metric, floor at y = 0). */
+    fun scanShop(info: ScanInfo): Shop = Shop(
+        id = "scan_${info.id}",
+        name = "Scan ${info.id}",
+        description = "Scanned store",
+        modelAsset = "models/demo_shop.glb",
+        bssids = emptySet(),
+        modelFile = info.model.absolutePath,
+        modelScale = prefs.getFloat("scale_scan_${info.id}", 1f),
+        modelYOffset = prefs.getFloat("y_scan_${info.id}", 0f),
+    )
 
     fun shops(): List<Shop> = listOf(demoShop)
 

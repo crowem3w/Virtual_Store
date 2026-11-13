@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,6 +34,8 @@ import org.example.test.data.ScanStore
 import org.example.test.data.Shop
 import org.example.test.data.ShopRegistry
 import org.example.test.data.WifiAp
+import org.example.test.recon.ReconService
+import org.example.test.recon.ReconState
 import org.example.test.ui.theme.TestTheme
 import org.example.test.wifi.WifiScanner
 
@@ -68,6 +71,8 @@ fun App() {
         if (!hasPermission || !hasCamera) permissionLauncher.launch(APP_PERMISSIONS)
     }
 
+    val reconProgress by ReconState.progress.collectAsState()
+    val reconFinished = reconProgress.values.count { it.done || it.error != null } // re-list scans when a job ends
     var currentShop by remember { mutableStateOf<Shop?>(null) }
     var registryVersion by remember { mutableIntStateOf(0) }
     var importStatus by remember { mutableStateOf<String?>(null) }
@@ -122,10 +127,16 @@ fun App() {
             registryVersion = registryVersion,
             onRegistryChanged = { registryVersion++ },
             hasCamera = hasCamera,
-            scans = remember(registryVersion, scanning) { scanStore.list() },
+            scans = remember(registryVersion, scanning, reconFinished) { scanStore.list() },
             onScan = { scanning = true },
             onShareScan = ::shareScan,
-            onDeleteScan = { scanStore.delete(it); registryVersion++ },
+            onDeleteScan = {
+                if (!ReconState.isRunning(it.id)) { scanStore.delete(it); registryVersion++ }
+            },
+            reconProgress = reconProgress,
+            onProcessScan = { ReconService.start(context, it.id) },
+            onCancelProcess = { ReconService.cancel(context, it.id) },
+            onOpenScan = { currentShop = registry.scanShop(it) },
             importStatus = importStatus,
             onImport = { importLauncher.launch(arrayOf("*/*")) },
             onRemoveImport = { registry.removeScan(); importStatus = null; registryVersion++ },
@@ -135,11 +146,13 @@ fun App() {
     }
 }
 
-private val APP_PERMISSIONS = arrayOf(
-    Manifest.permission.ACCESS_FINE_LOCATION,
-    Manifest.permission.ACCESS_COARSE_LOCATION,
-    Manifest.permission.CAMERA,
-)
+private val APP_PERMISSIONS = buildList {
+    add(Manifest.permission.ACCESS_FINE_LOCATION)
+    add(Manifest.permission.ACCESS_COARSE_LOCATION)
+    add(Manifest.permission.CAMERA)
+    // Android 13+: lets the processing service show its progress notification.
+    if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
+}.toTypedArray()
 
 private fun Context.hasFineLocation() =
     ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
