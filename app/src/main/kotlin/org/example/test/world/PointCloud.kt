@@ -94,6 +94,18 @@ class PointCloud(
     companion object {
         const val RECORD = 16
 
+        /** Adds every point of a saved points.bin to [into] (an indexed cloud, so a resumed scan keeps deduping). */
+        fun loadInto(file: File, into: PointCloud) {
+            if (!file.exists()) return
+            val bytes = file.readBytes()
+            val n = bytes.size / RECORD
+            val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until n) {
+                val x = bb.getFloat(); val y = bb.getFloat(); val z = bb.getFloat()
+                into.add(x, y, z, bb.getInt())
+            }
+        }
+
         /** Loads a saved points.bin without building the dedupe index (read-only use). */
         fun load(file: File): PointCloud {
             val pc = PointCloud(indexed = false, maxPoints = Int.MAX_VALUE)

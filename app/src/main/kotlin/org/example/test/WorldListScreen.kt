@@ -52,6 +52,7 @@ fun WorldListScreen(
     hasCamera: Boolean,
     onNew: () -> Unit,
     onOpen: (WorldInfo) -> Unit,
+    onResume: (WorldInfo) -> Unit,
     onRename: (WorldInfo, String) -> Unit,
     onDelete: (WorldInfo) -> Unit,
     onStore: () -> Unit,
@@ -115,6 +116,7 @@ fun WorldListScreen(
                                 )
                                 Row {
                                     TextButton(onClick = { onOpen(w) }, enabled = w.points > 0 || w.chunks > 0) { Text("Open") }
+                                    TextButton(onClick = { if (hasCamera) onResume(w) }, enabled = hasCamera && w.canResume) { Text("Resume") }
                                     TextButton(onClick = { renaming = w }) { Text("Rename") }
                                     TextButton(onClick = { deleting = w }) { Text("Delete") }
                                 }

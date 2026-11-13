@@ -1,4 +1,4 @@
-# Live world pipeline (phases 1 and 2)
+# Live world pipeline (phases 1 and 2, phase 3 in progress)
 
 Status: phases 1 and 2 of `LIVE_WORLD_PLAN.md` are implemented in the `world/` package. The old record-then-process
 scan flow (`ScanRecorder`, `Sfm`, `ReconPipeline`, `ReconService`, TSDF, `.glb` export) was removed.
@@ -69,6 +69,26 @@ ImageNet mean/std normalisation is in `DepthEstimator.MEAN/STD`.
 `WorldViewScreen` rebuilds the mesh from `chunks/` when a world is opened (streamed block by block, so large worlds
 do not need to fit in RAM). Worlds without chunks (phase 1, or no depth model) show their points.
 
+## Resume and extend (phase 3, step 1)
+`WorldListScreen` -> **Resume** opens `LiveScanScreen` with the saved world; **Continue** starts it.
+1. `ResumeData.read` loads `poses.jsonl`, the segments and intrinsics from `meta.json`, and the tier whose voxel size
+   matches the saved blocks (a resumed world keeps its voxel size, whatever the Quality setting says).
+2. `points.bin` is loaded into an indexed `PointCloud`, so new points keep deduping and only new ones are appended.
+3. `LiveSlam.loadSaved` re-detects ORB features on the saved keyframe JPEGs (at most 400, evenly spaced) and rebuilds a
+   sparse map by matching neighbouring keyframes and triangulating with their saved poses. Features are pinned in memory.
+4. The saved mesh streams from `chunks/` into the live view (`publishSavedMesh`); new data fuses into the same blocks.
+5. State `RELOCALIZING`: every camera frame is matched against 12 saved keyframes (the window cycles through all),
+   then PnP + RANSAC (>= 35 inliers and >= 35 % of candidates). On success tracking continues **in the saved slam
+   frame**, so new data lines up without any extra transform.
+6. Fallback **Place by hand**: top-down map of the saved points; tap where you stand, set the facing direction.
+   A fresh tracking session starts there (`placementSegment`), at the median saved camera height. The scale of a fresh
+   session is a guess (median first point 2.5 m), so seams with old data may be off.
+7. If tracking is lost later in a resumed world, the state returns to `RELOCALIZING` instead of `LOST`.
+
+**Segments.** A world can have several slam frames (the first scan, plus one per "place by hand"). `meta.json` has
+`segments: [{align, offset}]` (world = align * slam + offset); every line of `poses.jsonl` has `seg`. Worlds saved
+before this have no `segments`: `align_slam_to_world` becomes segment 0. `intrinsics` [fx, fy, cx, cy] is saved too.
+
 ## Not done yet (phase 3)
-Loop closure / drift correction, texture baking, `.glb` export, resuming and extending a saved world (the chunks and
-`TSDF` loader are in place for it). Not tested on a device: mesh quality, frame budget and the tier thresholds.
+Loop closure / drift correction (step 2: per-keyframe depth maps will be saved for re-fusing), texture baking and
+`.glb` export (step 3). Not tested on a device: mesh quality, frame budget, tier thresholds, relocalization.

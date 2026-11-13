@@ -85,9 +85,12 @@ worlds/<id>/
 - Device tier benchmark with manual override; TSDF chunks saved for Phase 3 resume.
 
 ### Phase 3: Finish
-- Loop closure and pose-graph correction.
-- Texture baking and `.glb` export.
-- Resume and extend a saved world.
+Decisions: re-fuse the TSDF from saved keyframes and per-keyframe depth maps after loop closure; loop closure runs
+live in the background; resume relocalizes against saved keyframes with tap-to-place as fallback; 4096 px texture atlas
+pages; no storage cap, only a warning; depth model is Depth-Anything-small.
+1. **Resume and extend a saved world** (implemented, see PIPELINE.md).
+2. Loop closure and pose-graph correction (live), depth maps saved per keyframe, re-fuse.
+3. Texture baking and `.glb` export.
 
 ## 9. Risks
 

@@ -58,7 +58,7 @@ class Pose(val r: DoubleArray, val t: DoubleArray) {
     )
 }
 
-enum class TrackState { INITIALIZING, TRACKING, LOST }
+enum class TrackState { INITIALIZING, RELOCALIZING, TRACKING, LOST }
 
 /** Camera pose in the gravity-aligned world (x right, y down, z forward), for rendering. */
 class CamPose(val r: DoubleArray, val t: DoubleArray, val rotDeg: Int)
@@ -72,6 +72,10 @@ class CamPose(val r: DoubleArray, val t: DoubleArray, val rotDeg: Int)
  *  - Mapping: new keyframes triangulate new sparse points; a background thread runs the depth model
  *    on every keyframe and adds a dense, coloured point set to [cloud].
  *
+ * Resume: [loadSaved] rebuilds a sparse map from the saved keyframes (their poses are known) and the state
+ * becomes RELOCALIZING until a camera frame matches that map; tracking then continues in the saved frame.
+ * If that fails, [placeManually] starts a fresh tracking session that the user has positioned in the saved world.
+ *
  * No bundle adjustment or loop closure yet (phase 3): long walks drift.
  * [process] is called from the camera analysis thread; [finish] from any thread.
  */
@@ -83,10 +87,20 @@ class LiveSlam(
     val tier: Tier = Tier.MID,
 ) {
     private class Features(val xy: FloatArray, var desc: Mat?, val pids: IntArray) {
-        fun release() { desc?.release(); desc = null }
+        /** Pinned features (saved keyframes used for relocalization) survive [release]; only [forceRelease] frees them. */
+        var pinned = false
+        fun release() { if (!pinned) forceRelease() }
+        fun forceRelease() { desc?.release(); desc = null }
     }
 
-    private class Keyframe(val id: Int, val pose: Pose, val rotDeg: Int, val feat: Features)
+    private class Keyframe(val id: Int, val pose: Pose, val rotDeg: Int, val feat: Features, val seg: Int)
+
+    private class RelocAcc {
+        val obj = ArrayList<Point3>(); val img = ArrayList<Point>()
+        val cand = ArrayList<IntArray>() // (map point id, keypoint index in the live frame)
+        val seen = HashSet<Int>()
+        val hits = ArrayList<Pair<Keyframe, Int>>()
+    }
 
     @Volatile var state = TrackState.INITIALIZING; private set
     @Volatile var hint = "Move the phone sideways, slowly"; private set
@@ -126,8 +140,18 @@ class LiveSlam(
     private var initDev: FloatArray? = null
     private var initAge = 0
 
-    /** Slam frame -> gravity-aligned world (row-major 3x3). */
-    @Volatile private var align: DoubleArray = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    /** Slam frames of this world; [segIndex] is the one the camera is tracked in now. See [Segment]. */
+    private val segments = ArrayList<Segment>()
+    @Volatile private var segIndex = 0
+    private val seg: Segment get() = segments.getOrElse(segIndex) { Segment.identity() }
+
+    // Resume state.
+    private val anchors = ArrayList<Keyframe>() // saved keyframes with pinned features, relocalization targets
+    private var relocCursor = 0
+    private var placement: DoubleArray? = null // x, y, z, yaw of a manual placement, used by the next init
+    private var resumeCamY = 0.0
+    /** World x,z (pairs) of the saved camera positions, for the manual placement screen. */
+    @Volatile var resumePathXZ = FloatArray(0); private set
 
     private var stopped = false
     private val executor = Executors.newSingleThreadExecutor()
@@ -145,7 +169,11 @@ class LiveSlam(
         val f = detect(rgba)
         if (f == null) { hint = "Point at something with more texture"; return }
         try {
-            if (state == TrackState.INITIALIZING) tryInit(f, rgba, rotDeg, dev) else track(f, rgba, rotDeg)
+            when (state) {
+                TrackState.INITIALIZING -> tryInit(f, rgba, rotDeg, dev)
+                TrackState.RELOCALIZING -> relocalize(f, rotDeg)
+                else -> track(f, rgba, rotDeg)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "frame failed", e)
             f.release()
@@ -160,8 +188,20 @@ class LiveSlam(
         executor.shutdown()
         runCatching { executor.awaitTermination(30, TimeUnit.SECONDS) }
         mesher?.stop()
-        session.finish(cloud, kfs.size, align, lastJpeg, tsdf, tier)
+        session.finish(cloud, nextKfId, lastJpeg, tsdf, tier)
         kfs.forEach { it.feat.release() }
+        anchors.forEach { it.feat.forceRelease() }
+        depth?.close()
+    }
+
+    /** Stops without saving: for a resume that could not be set up. */
+    @Synchronized
+    fun abort() {
+        if (stopped) return
+        stopped = true
+        executor.shutdown()
+        mesher?.stop()
+        anchors.forEach { it.feat.forceRelease() }
         depth?.close()
     }
 
@@ -170,13 +210,22 @@ class LiveSlam(
     private fun setupIntrinsics(w: Int, h: Int) {
         val f = geometry.focalMm; val s = geometry.sensorWidthMm
         val fx = if (f != null && s != null && s > 0) f * w / s else 0.85 * w
-        val intr = Intrinsics(fx, fx, w / 2.0, h / 2.0)
+        useIntrinsics(Intrinsics(fx, fx, w / 2.0, h / 2.0))
+    }
+
+    private fun useIntrinsics(intr: Intrinsics) {
         k = intr; kMat = intr.matrix()
+        session.intrinsics = intr
     }
 
     private fun detect(rgba: Mat): Features? {
         val gray = Mat()
         Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY)
+        return detectGray(gray)
+    }
+
+    /** Takes ownership of [gray]. */
+    private fun detectGray(gray: Mat): Features? {
         val kp = MatOfKeyPoint(); val desc = Mat()
         orb.detectAndCompute(gray, Mat(), kp, desc)
         gray.release()
@@ -203,6 +252,178 @@ class LiveSlam(
             m.release()
         }
         return bestForB.map { (ib, v) -> intArrayOf(v.second, ib) }
+    }
+
+    // ---- resume: saved map, relocalization, manual placement --------------------------------------
+
+    /**
+     * Rebuilds a sparse map from the saved keyframes: their poses are known, so matching consecutive
+     * keyframes and triangulating gives map points with descriptors. Call before the analyzer gets this
+     * object. Returns false when too few keyframes could be loaded. [progress] receives (done, total).
+     * Long worlds are thinned to [MAX_ANCHORS] evenly spaced keyframes.
+     */
+    @Synchronized
+    fun loadSaved(data: ResumeData, dir: File, progress: (Int, Int) -> Unit): Boolean {
+        if (stopped || data.keyframes.isEmpty()) return false
+        segments.clear(); segments.addAll(data.segments)
+        segIndex = data.keyframes.last().seg.coerceIn(0, segments.size - 1)
+        session.segments = segments.toList()
+        data.intrinsics?.let { useIntrinsics(it) }
+        resumeCamY = data.cameraY
+        nextKfId = data.keyframes.last().id + 1
+        keyframeCount = nextKfId
+
+        val path = FloatArray(2 * data.keyframes.size)
+        for ((i, sk) in data.keyframes.withIndex()) {
+            val c = data.segments[sk.seg].toWorld(sk.pose.center)
+            path[2 * i] = c[0].toFloat(); path[2 * i + 1] = c[2].toFloat()
+        }
+        resumePathXZ = path
+
+        val picked = pickEvenly(data.keyframes, MAX_ANCHORS)
+        val recent = ArrayList<Keyframe>() // the last two loaded keyframes: triangulation partners
+        var done = 0
+        for (sk in picked) {
+            progress(done++, picked.size)
+            val bgr = Imgcodecs.imread(File(File(dir, "keyframes"), "%05d.jpg".format(sk.id)).absolutePath)
+            if (bgr.empty()) { bgr.release(); continue }
+            if (k == null) setupIntrinsics(bgr.cols(), bgr.rows())
+            val gray = Mat()
+            Imgproc.cvtColor(bgr, gray, Imgproc.COLOR_BGR2GRAY)
+            bgr.release()
+            val f = detectGray(gray) ?: continue
+            f.pinned = true
+            val kf = Keyframe(sk.id, sk.pose, sk.rotDeg, f, sk.seg)
+            for (prev in recent) if (prev.seg == kf.seg) linkSaved(prev, kf)
+            recent.add(kf)
+            if (recent.size > 2) recent.removeAt(0)
+            anchors.add(kf)
+        }
+        progress(picked.size, picked.size)
+        if (anchors.size < ResumeData.MIN_KEYFRAMES) {
+            anchors.forEach { it.feat.forceRelease() }; anchors.clear()
+            return false
+        }
+
+        // Show the saved world from where the last scan ended while the user finds their way back.
+        val last = anchors.last()
+        segIndex = last.seg
+        publishPose(last.pose, last.rotDeg)
+        state = TrackState.RELOCALIZING
+        hint = "Point the camera at an area you scanned before"
+        return true
+    }
+
+    /** Puts the saved mesh into the live view (blocks stream from disk). Only for tiers with a live mesh. */
+    fun publishSavedMesh(progress: (Int, Int) -> Unit) {
+        val ts = tsdf ?: return
+        if (!tier.liveMesh) return
+        ts.meshFromDisk({ meshStore.publish(it) }, progress, tier.maxBlocksInRam / 2)
+    }
+
+    /** Matches [a] (earlier) with [b]: shares map points where [a] has them, triangulates new ones from the known poses. */
+    private fun linkSaved(a: Keyframe, b: Keyframe) {
+        val intr = k ?: return
+        for (mm in match(a.feat, b.feat)) {
+            if (b.feat.pids[mm[1]] >= 0) continue
+            val pa = a.feat.pids[mm[0]]
+            if (pa >= 0) { b.feat.pids[mm[1]] = pa; continue }
+            val x = triangulate(
+                intr, a.pose, a.feat.xy[2 * mm[0]], a.feat.xy[2 * mm[0] + 1],
+                b.pose, b.feat.xy[2 * mm[1]], b.feat.xy[2 * mm[1] + 1],
+            ) ?: continue
+            if (x[3] < 1.5) continue
+            val za = a.pose.toCamera(x)[2]; val zb = b.pose.toCamera(x)[2]
+            if (za < 0.05 || za > 60.0 || zb < 0.05 || zb > 60.0) continue
+            val id = addMapPoint(x[0], x[1], x[2])
+            a.feat.pids[mm[0]] = id; b.feat.pids[mm[1]] = id
+        }
+    }
+
+    private fun <T> pickEvenly(all: List<T>, max: Int): List<T> {
+        if (all.size <= max) return all
+        return (0 until max).map { (it.toLong() * (all.size - 1) / (max - 1)).toInt() }.distinct().map { all[it] }
+    }
+
+    /**
+     * Tries to find the camera in the saved map: a few saved keyframes per frame (the window cycles through
+     * all of them), PnP + RANSAC on the matched map points. On success tracking continues in that keyframe's
+     * slam frame, so new data lines up with the old without any extra transform.
+     */
+    private fun relocalize(f: Features, rotDeg: Int) {
+        val km = kMat
+        val n = anchors.size
+        if (km == null || n == 0) { f.release(); return }
+        val take = minOf(RELOC_WINDOW, n)
+        val bySeg = HashMap<Int, RelocAcc>()
+        for (i in 0 until take) {
+            val kf = anchors[(relocCursor + i) % n]
+            val acc = bySeg.getOrPut(kf.seg) { RelocAcc() }
+            var hitCount = 0
+            for (mm in match(kf.feat, f)) {
+                val pid = kf.feat.pids[mm[0]]
+                if (pid < 0) continue
+                hitCount++
+                if (!acc.seen.add(pid)) continue
+                acc.obj.add(Point3(mapXyz[3 * pid], mapXyz[3 * pid + 1], mapXyz[3 * pid + 2]))
+                acc.img.add(Point(f.xy[2 * mm[1]].toDouble(), f.xy[2 * mm[1] + 1].toDouble()))
+                acc.cand.add(intArrayOf(pid, mm[1]))
+            }
+            acc.hits.add(kf to hitCount)
+        }
+        relocCursor = (relocCursor + take) % n
+
+        for ((sIdx, acc) in bySeg) {
+            if (acc.cand.size < RELOC_MIN_INLIERS) continue
+            val rvec = Mat(); val tvec = Mat(); val inl = Mat()
+            val ok = Calib3d.solvePnPRansac(
+                MatOfPoint3f(*acc.obj.toTypedArray()), MatOfPoint2f(*acc.img.toTypedArray()), km, MatOfDouble(),
+                rvec, tvec, false, 300, 4.0f, 0.99, inl, Calib3d.SOLVEPNP_ITERATIVE,
+            )
+            val inliers = inl.rows()
+            if (!ok || inliers < RELOC_MIN_INLIERS || inliers < 0.35 * acc.cand.size) {
+                rvec.release(); tvec.release(); inl.release()
+                continue
+            }
+            val rm = Mat(); Calib3d.Rodrigues(rvec, rm)
+            val r = DoubleArray(9); rm.get(0, 0, r)
+            val t = DoubleArray(3); tvec.get(0, 0, t)
+            val idx = IntArray(inliers); inl.get(0, 0, idx)
+            rm.release(); rvec.release(); tvec.release(); inl.release()
+
+            val pose = Pose(r, t)
+            for (q in idx) f.pids[acc.cand[q][1]] = acc.cand[q][0]
+            segIndex = sIdx
+            kfs.clear()
+            kfs.addAll(acc.hits.sortedByDescending { it.second }.take(3).map { it.first }.sortedBy { it.id })
+            lostCount = 0
+            lastKfInliers = inliers
+            lastKfMs = System.currentTimeMillis()
+            lastPose = pose
+            state = TrackState.TRACKING
+            hint = "Found your place: keep moving slowly"
+            publishPose(pose, rotDeg)
+            f.release()
+            return
+        }
+        f.release()
+    }
+
+    /**
+     * Fallback when relocalization does not find the place: starts a fresh tracking session whose start is
+     * at world ([x], [z]) facing [yawRad] (0 = +z, towards +x as it grows), at the height of the saved camera.
+     * The scale of a fresh session is only a guess, so seams with the old data may not be exact.
+     */
+    @Synchronized
+    fun placeManually(x: Float, z: Float, yawRad: Double) {
+        if (stopped || state != TrackState.RELOCALIZING) return
+        placement = doubleArrayOf(x.toDouble(), resumeCamY, z.toDouble(), yawRad)
+        anchors.forEach { it.feat.forceRelease() }
+        anchors.clear()
+        kfs.clear()
+        lostCount = 0
+        state = TrackState.INITIALIZING
+        hint = "Placed: move the phone sideways, slowly, to start"
     }
 
     // ---- initialisation ---------------------------------------------------------------------------
@@ -257,7 +478,13 @@ class LiveSlam(
         // Fix the scale so the typical initial point is INIT_DEPTH_M away (indoors ~ metres).
         val s = INIT_DEPTH_M / median(DoubleArray(tri.size) { tri[it].third[2] })
         val pose1 = Pose(r, doubleArrayOf(t[0] * s, t[1] * s, t[2] * s))
-        align = buildAlignment(initDev, initRot)
+        val ga = buildAlignment(initDev, initRot)
+        val place = placement
+        val newSeg = if (place != null) placementSegment(ga, place[0], place[1], place[2], place[3]) else Segment(ga, doubleArrayOf(0.0, 0.0, 0.0))
+        placement = null
+        segments.add(newSeg)
+        segIndex = segments.size - 1
+        session.segments = segments.toList()
 
         val ref = initRgba ?: return
         for ((ia, ib, x) in tri) {
@@ -265,8 +492,8 @@ class LiveSlam(
             a.pids[ia] = id; f.pids[ib] = id
             if (depth == null) addSparse(x[0] * s, x[1] * s, x[2] * s, ref, a.xy[2 * ia], a.xy[2 * ia + 1])
         }
-        val kf0 = Keyframe(nextKfId++, p0, initRot, a)
-        val kf1 = Keyframe(nextKfId++, pose1, rotDeg, f)
+        val kf0 = Keyframe(nextKfId++, p0, initRot, a, segIndex)
+        val kf1 = Keyframe(nextKfId++, pose1, rotDeg, f, segIndex)
         addKeyframe(kf0, ref)
         addKeyframe(kf1, rgba)
         initFeat = null; initRgba?.release(); initRgba = null
@@ -348,7 +575,7 @@ class LiveSlam(
                 if (depth == null) addSparse(x[0], x[1], x[2], rgba, f.xy[2 * mm[1]], f.xy[2 * mm[1] + 1])
             }
         }
-        val kf = Keyframe(nextKfId++, pose, rotDeg, f)
+        val kf = Keyframe(nextKfId++, pose, rotDeg, f, segIndex)
         lastKfInliers = inIdx.size
         lastKfMs = now
         addKeyframe(kf, rgba)
@@ -358,8 +585,13 @@ class LiveSlam(
         f.release()
         lostCount++
         if (lostCount >= 8) {
-            state = TrackState.LOST
-            hint = "Tracking lost: return to a place you've already scanned"
+            if (anchors.isNotEmpty()) {
+                state = TrackState.RELOCALIZING
+                hint = "Tracking lost: point at an area you scanned before"
+            } else {
+                state = TrackState.LOST
+                hint = "Tracking lost: return to a place you've already scanned"
+            }
         } else {
             hint = "Tracking weak: slow down"
         }
@@ -384,29 +616,26 @@ class LiveSlam(
 
     private fun addKeyframe(kf: Keyframe, rgba: Mat) {
         kfs.add(kf)
-        keyframeCount = kfs.size
+        keyframeCount = kf.id + 1
         if (kfs.size > FEATURES_KEPT) kfs[kfs.size - 1 - FEATURES_KEPT].feat.release()
         submitJob(kf, rgba)
     }
 
-    private fun toWorld(p: DoubleArray): DoubleArray {
-        val a = align
-        return doubleArrayOf(
-            a[0] * p[0] + a[1] * p[1] + a[2] * p[2],
-            a[3] * p[0] + a[4] * p[1] + a[5] * p[2],
-            a[6] * p[0] + a[7] * p[1] + a[8] * p[2],
-        )
-    }
+    private fun toWorld(p: DoubleArray, s: Segment = seg): DoubleArray = s.toWorld(p)
 
     private fun publishPose(pose: Pose, rotDeg: Int) {
-        val a = align
+        val sg = seg
+        val a = sg.align
         val rg = DoubleArray(9)
         for (i in 0..2) for (j in 0..2) {
             var s = 0.0
             for (m in 0..2) s += pose.r[i * 3 + m] * a[j * 3 + m] // R * A^T
             rg[i * 3 + j] = s
         }
-        camPose = CamPose(rg, pose.t.copyOf(), rotDeg)
+        // x_cam = R x_slam + t with x_slam = A^T (x_world - T)  =>  x_cam = rg x_world + (t - rg T)
+        val o = sg.offset
+        val tg = DoubleArray(3) { i -> pose.t[i] - (rg[3 * i] * o[0] + rg[3 * i + 1] * o[1] + rg[3 * i + 2] * o[2]) }
+        camPose = CamPose(rg, tg, rotDeg)
         tsdf?.let {
             val c = toWorld(pose.center)
             it.focus = floatArrayOf(c[0].toFloat(), c[1].toFloat(), c[2].toFloat())
@@ -446,22 +675,23 @@ class LiveSlam(
         val skipDepth = pending.get() >= 3 || (kfs.size > 2 && nowMs - lastDepthMs < tier.depthIntervalMs)
         if (!skipDepth) lastDepthMs = nowMs
         pending.incrementAndGet()
-        val id = kf.id; val pose = kf.pose; val rot = kf.rotDeg; val kfTotal = kfs.size
-        executor.execute { runJob(id, bgr, pose, rot, obs, skipDepth, kfTotal) }
+        val id = kf.id; val pose = kf.pose; val rot = kf.rotDeg; val kfTotal = kf.id + 1
+        val sIdx = segIndex; val sg = seg
+        executor.execute { runJob(id, bgr, pose, rot, obs, skipDepth, kfTotal, sIdx, sg) }
     }
 
-    private fun runJob(id: Int, bgr: Mat, pose: Pose, rotDeg: Int, obs: List<DoubleArray>, skipDepth: Boolean, kfTotal: Int) {
+    private fun runJob(id: Int, bgr: Mat, pose: Pose, rotDeg: Int, obs: List<DoubleArray>, skipDepth: Boolean, kfTotal: Int, sIdx: Int, sg: Segment) {
         try {
             val buf = MatOfByte()
             Imgcodecs.imencode(".jpg", bgr, buf, MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 85))
             val jpeg = buf.toArray(); buf.release()
-            session.saveKeyframe(id, jpeg, pose.r, pose.t, rotDeg)
+            session.saveKeyframe(id, jpeg, pose.r, pose.t, rotDeg, sIdx)
             lastJpeg = jpeg
-            if (depth != null && !skipDepth) fuse(bgr, pose, obs)
+            if (depth != null && !skipDepth) fuse(bgr, pose, obs, sg)
             val now = System.currentTimeMillis()
             if (now - lastFlushMs > FLUSH_MS) {
                 lastFlushMs = now
-                session.flush(cloud, kfTotal, align, tsdf, tier)
+                session.flush(cloud, kfTotal, tsdf, tier)
                 tsdf?.evictToCap()
             }
         } catch (e: Throwable) {
@@ -473,7 +703,7 @@ class LiveSlam(
     }
 
     /** Runs the depth model, fits it to the sparse points (1/z = a*d + b) and adds coloured points to the cloud. */
-    private fun fuse(bgr: Mat, pose: Pose, obs: List<DoubleArray>) {
+    private fun fuse(bgr: Mat, pose: Pose, obs: List<DoubleArray>, sg: Segment) {
         val dp = depth ?: return
         val intr = k ?: return
         val w = bgr.cols(); val h = bgr.rows()
@@ -502,7 +732,7 @@ class LiveSlam(
         val rays = if (ts != null) FloatArray(4 * gw * gh) else null
         val rayCol = if (ts != null) IntArray(gw * gh) else null
         var nRays = 0
-        val org = toWorld(pose.center)
+        val org = sg.toWorld(pose.center)
 
         for (gy in 0 until gh) for (gx in 0 until gw) {
             val z = zs[gy * gw + gx].toDouble()
@@ -511,7 +741,7 @@ class LiveSlam(
             val dcx = (u - intr.cx) / intr.fx; val dcy = (v - intr.cy) / intr.fy
             val pc = doubleArrayOf(dcx * z, dcy * z, z)
             val pw = pose.dirToWorld(pc[0] - pose.t[0], pc[1] - pose.t[1], pc[2] - pose.t[2]) // R^T (pc - t)
-            val g = toWorld(pw)
+            val g = sg.toWorld(pw)
             val o = (v * w + u) * 3
             val color = (0xFF shl 24) or ((px[o + 2].toInt() and 255) shl 16) or
                 ((px[o + 1].toInt() and 255) shl 8) or (px[o].toInt() and 255)
@@ -520,7 +750,7 @@ class LiveSlam(
             // The mesh only takes samples from smooth depth: blurred depth edges would make "flying" surfaces.
             if (rays != null && rayCol != null && z <= TSDF_MAX_DEPTH && smoothAt(zs, gx, gy, gw, gh)) {
                 val dl = sqrt(dcx * dcx + dcy * dcy + 1.0)
-                val dw = toWorld(pose.dirToWorld(dcx, dcy, 1.0))
+                val dw = sg.dirToWorld(pose.dirToWorld(dcx, dcy, 1.0))
                 rays[4 * nRays] = (dw[0] / dl).toFloat()
                 rays[4 * nRays + 1] = (dw[1] / dl).toFloat()
                 rays[4 * nRays + 2] = (dw[2] / dl).toFloat()
@@ -621,6 +851,9 @@ class LiveSlam(
         private const val MIN_TRACK_INLIERS = 18
         private const val INIT_DEPTH_M = 2.5
         private const val FEATURES_KEPT = 40
+        private const val MAX_ANCHORS = 400 // saved keyframes kept as relocalization targets (about 35 KB each)
+        private const val RELOC_WINDOW = 12 // saved keyframes matched per camera frame
+        private const val RELOC_MIN_INLIERS = 35
         private const val FLUSH_MS = 8_000L
         private const val TSDF_MAX_DEPTH = 6.0 // metres: monocular depth is too noisy beyond this for the mesh
         private const val BORDER = 8

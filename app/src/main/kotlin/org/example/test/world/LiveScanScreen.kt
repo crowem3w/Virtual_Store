@@ -42,14 +42,18 @@ import kotlinx.coroutines.withContext
 import org.example.test.OrientationTracker
 import org.example.test.recon.DepthEstimator
 import org.opencv.android.OpenCVLoader
+import java.io.File
 import java.util.concurrent.Executors
+
+private class StartResult(val slam: LiveSlam?, val error: String?)
 
 /**
  * Black screen, the world drawing itself, a small camera view top-right.
- * Start begins a new world; Stop (or Back) saves it and returns to the list.
+ * Start begins a new world (or continues [resume]); Stop (or Back) saves it and returns to the list.
+ * When resuming, the camera first has to find its place in the saved world, or the user places it by hand.
  */
 @Composable
-fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean, onExit: () -> Unit) {
+fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean, resume: WorldInfo? = null, onExit: () -> Unit) {
     val context = LocalContext.current
     val tracker = remember { OrientationTracker(context) }
     DisposableEffect(tracker) {
@@ -67,6 +71,7 @@ fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean
     var saving by remember { mutableStateOf(false) }
     var thirdPerson by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var placing by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
     val glRef = remember { arrayOfNulls<MeshGlView>(1) }
 
@@ -84,15 +89,35 @@ fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean
         if (starting || slam != null) return
         starting = true
         scope.launch {
-            notice = if (settings.effective() == null) "Checking device speed (first scan only)…" else null
-            val created = withContext(Dispatchers.Default) {
-                if (!OpenCVLoader.initLocal()) return@withContext null
+            notice = if (settings.effective() == null && resume == null) "Checking device speed (first scan only)…" else null
+            val result = withContext(Dispatchers.Default) {
+                if (!OpenCVLoader.initLocal()) return@withContext StartResult(null, "OpenCV failed to load.")
                 val depth = try { DepthEstimator(context) } catch (_: Throwable) { null }
-                val tier = settings.effective() ?: TierBenchmark.run(context, depth).also { settings.save(it) }.tier
-                LiveSlam(geometry, depth, PointCloud(), store.create(), tier)
+                val data = resume?.let { ResumeData.read(it.dir) }
+                if (resume != null && data == null) {
+                    depth?.close()
+                    return@withContext StartResult(null, "This world has too few saved keyframes to continue.")
+                }
+                // A resumed world keeps the voxel size of its saved blocks.
+                val tier = data?.tier ?: settings.effective() ?: TierBenchmark.run(context, depth).also { settings.save(it) }.tier
+                val session = if (resume != null) store.open(resume) else store.create()
+                val live = LiveSlam(geometry, depth, PointCloud(), session, tier)
+                if (resume != null && data != null) {
+                    notice = "Loading saved world…"
+                    PointCloud.loadInto(File(resume.dir, "points.bin"), live.cloud)
+                    session.setSavedPoints(live.cloud.count)
+                    val ok = live.loadSaved(data, resume.dir) { d, t -> notice = "Preparing saved world: keyframe $d of $t" }
+                    if (!ok) {
+                        live.abort()
+                        return@withContext StartResult(null, "Could not read enough saved keyframes to continue.")
+                    }
+                    live.publishSavedMesh { d, t -> notice = "Loading saved mesh: $d of $t blocks" }
+                }
+                StartResult(live, null)
             }
+            val created = result.slam
             if (created == null) {
-                notice = "OpenCV failed to load."
+                notice = result.error
             } else {
                 notice = when {
                     !created.hasDepthModel -> "No depth model (assets/models/depth.tflite): showing sparse points only."
@@ -133,6 +158,18 @@ fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean
                 v.requestRender()
             }
         }
+    }
+
+    val placeTarget = slam
+    if (placing && placeTarget != null && placeTarget.state == TrackState.RELOCALIZING) {
+        PlaceStartPicker(
+            cloud = placeTarget.cloud,
+            path = placeTarget.resumePathXZ,
+            onConfirm = { x, z, yaw -> placeTarget.placeManually(x, z, yaw); placing = false },
+            onCancel = { placing = false },
+        )
+        BackHandler { placing = false }
+        return
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -207,18 +244,27 @@ fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean
             val text = when {
                 !hasCamera -> "Camera permission needed."
                 saving -> "Saving world…"
-                s == null -> notice ?: "Press Start, then walk slowly and move sideways."
+                s == null -> notice ?: if (resume != null) {
+                    "Press Continue, then point the camera at a place you scanned before."
+                } else {
+                    "Press Start, then walk slowly and move sideways."
+                }
                 else -> listOfNotNull(s.hint, notice).joinToString("\n")
             }
             Text(text, color = Color.White)
             Row(Modifier.padding(top = 8.dp)) {
                 if (s == null) {
                     Button(onClick = ::start, enabled = hasCamera && !starting) {
-                        Text(if (starting) "Starting…" else "Start")
+                        Text(if (starting) "Starting…" else if (resume != null) "Continue" else "Start")
                     }
                 } else {
                     FilledTonalButton(onClick = { thirdPerson = !thirdPerson }) {
                         Text(if (thirdPerson) "View: from behind" else "View: camera")
+                    }
+                    if (s.state == TrackState.RELOCALIZING) {
+                        FilledTonalButton(onClick = { placing = true }, modifier = Modifier.padding(start = 8.dp)) {
+                            Text("Place by hand")
+                        }
                     }
                 }
             }

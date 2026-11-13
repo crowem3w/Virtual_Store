@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
 private sealed interface Screen {
     data object Worlds : Screen
     data object StoreHome : Screen
-    data object Live : Screen
+    data class Live(val resume: WorldInfo?) : Screen
     data class View(val world: WorldInfo) : Screen
     data class Store(val shop: Shop) : Screen
 }
@@ -116,17 +116,19 @@ fun App() {
         Screen.Worlds -> WorldListScreen(
             worlds = remember(version, screen) { worldStore.list() },
             hasCamera = hasCamera,
-            onNew = { screen = Screen.Live },
+            onNew = { screen = Screen.Live(null) },
+            onResume = { screen = Screen.Live(it) },
             onOpen = { screen = Screen.View(it) },
             onRename = { w, name -> worldStore.rename(w, name); version++ },
             onDelete = { worldStore.delete(it); version++ },
             onStore = { screen = Screen.StoreHome },
             settings = tierSettings,
         )
-        Screen.Live -> LiveScanScreen(
+        is Screen.Live -> LiveScanScreen(
             store = worldStore,
             settings = tierSettings,
             hasCamera = hasCamera,
+            resume = s.resume,
             onExit = { version++; screen = Screen.Worlds },
         )
         is Screen.View -> WorldViewScreen(info = s.world, onExit = { screen = Screen.Worlds })
