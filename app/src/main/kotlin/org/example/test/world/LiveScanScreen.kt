@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -48,7 +49,7 @@ import java.util.concurrent.Executors
  * Start begins a new world; Stop (or Back) saves it and returns to the list.
  */
 @Composable
-fun LiveScanScreen(store: WorldStore, hasCamera: Boolean, onExit: () -> Unit) {
+fun LiveScanScreen(store: WorldStore, settings: TierSettings, hasCamera: Boolean, onExit: () -> Unit) {
     val context = LocalContext.current
     val tracker = remember { OrientationTracker(context) }
     DisposableEffect(tracker) {
@@ -67,6 +68,7 @@ fun LiveScanScreen(store: WorldStore, hasCamera: Boolean, onExit: () -> Unit) {
     var thirdPerson by remember { mutableStateOf(true) }
     var notice by remember { mutableStateOf<String?>(null) }
     var tick by remember { mutableIntStateOf(0) }
+    val glRef = remember { arrayOfNulls<MeshGlView>(1) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -82,16 +84,21 @@ fun LiveScanScreen(store: WorldStore, hasCamera: Boolean, onExit: () -> Unit) {
         if (starting || slam != null) return
         starting = true
         scope.launch {
+            notice = if (settings.effective() == null) "Checking device speed (first scan only)…" else null
             val created = withContext(Dispatchers.Default) {
                 if (!OpenCVLoader.initLocal()) return@withContext null
                 val depth = try { DepthEstimator(context) } catch (_: Throwable) { null }
-                LiveSlam(geometry, depth, PointCloud(), store.create())
+                val tier = settings.effective() ?: TierBenchmark.run(context, depth).also { settings.save(it) }.tier
+                LiveSlam(geometry, depth, PointCloud(), store.create(), tier)
             }
             if (created == null) {
                 notice = "OpenCV failed to load."
             } else {
-                notice = if (created.hasDepthModel) null
-                else "No depth model (assets/models/depth.tflite): showing sparse points only."
+                notice = when {
+                    !created.hasDepthModel -> "No depth model (assets/models/depth.tflite): showing sparse points only."
+                    !created.tier.liveMesh -> "${created.tier.label} quality: live points, the mesh is built when you open the world."
+                    else -> null
+                }
                 analyzer.slam = created
                 slam = created
             }
@@ -115,17 +122,44 @@ fun LiveScanScreen(store: WorldStore, hasCamera: Boolean, onExit: () -> Unit) {
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val pointPx = with(androidx.compose.ui.platform.LocalDensity.current) { 3.dp.toPx() }
 
+    // The mesh view redraws at about 30 fps with the latest camera pose.
+    LaunchedEffect(slam) {
+        while (isActive) {
+            delay(33)
+            val cam = slam?.camPose
+            val v = glRef[0]
+            if (v != null && cam != null) {
+                v.renderer.setView(cam.r, cam.t, cam.rotDeg, if (thirdPerson) 2.0f else 0f, thirdPerson)
+                v.requestRender()
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        Canvas(Modifier.fillMaxSize()) {
-            @Suppress("UNUSED_VARIABLE") val redraw = tick
-            val s = slam
-            val cam = s?.camPose
-            if (s != null && cam != null) {
-                drawIntoCanvas {
-                    renderer.draw(
-                        it.nativeCanvas, size.width, size.height, s.cloud,
-                        cam.r, cam.t, cam.rotDeg, if (thirdPerson) 2.0f else 0f, pointPx, thirdPerson,
-                    )
+        val live = slam
+        if (live != null && live.liveMesh) {
+            AndroidView(
+                factory = { ctx ->
+                    MeshGlView(ctx).also {
+                        it.renderer.store = live.meshStore
+                        (ctx as? androidx.lifecycle.LifecycleOwner)?.let { o -> it.bindLifecycle(o) }
+                        glRef[0] = it
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Canvas(Modifier.fillMaxSize()) {
+                @Suppress("UNUSED_VARIABLE") val redraw = tick
+                val s = slam
+                val cam = s?.camPose
+                if (s != null && cam != null) {
+                    drawIntoCanvas {
+                        renderer.draw(
+                            it.nativeCanvas, size.width, size.height, s.cloud,
+                            cam.r, cam.t, cam.rotDeg, if (thirdPerson) 2.0f else 0f, pointPx, thirdPerson,
+                        )
+                    }
                 }
             }
         }
@@ -153,7 +187,11 @@ fun LiveScanScreen(store: WorldStore, hasCamera: Boolean, onExit: () -> Unit) {
             if (s != null) {
                 @Suppress("UNUSED_VARIABLE") val redraw = tick
                 Text(
-                    "${s.state.name.lowercase()} · ${s.cloud.count} points · ${s.keyframeCount} keyframes",
+                    if (s.liveMesh) {
+                        "${s.state.name.lowercase()} · ${s.tier.label} · ${s.triangles} triangles · ${s.keyframeCount} keyframes"
+                    } else {
+                        "${s.state.name.lowercase()} · ${s.tier.label} · ${s.cloud.count} points · ${s.keyframeCount} keyframes"
+                    },
                     color = Color.White,
                     modifier = Modifier.padding(top = 8.dp),
                 )

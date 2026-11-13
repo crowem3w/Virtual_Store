@@ -2,6 +2,7 @@ package org.example.test
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,6 +27,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -32,7 +35,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import org.example.test.world.TierChoice
+import org.example.test.world.TierSettings
 import org.example.test.world.WorldInfo
 import java.text.DateFormat
 import java.util.Date
@@ -48,7 +55,9 @@ fun WorldListScreen(
     onRename: (WorldInfo, String) -> Unit,
     onDelete: (WorldInfo) -> Unit,
     onStore: () -> Unit,
+    settings: TierSettings,
 ) {
+    var showQuality by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<WorldInfo?>(null) }
     var deleting by remember { mutableStateOf<WorldInfo?>(null) }
 
@@ -56,7 +65,10 @@ fun WorldListScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Worlds") },
-                actions = { TextButton(onClick = onStore) { Text("Store (Wi-Fi)") } },
+                actions = {
+                    TextButton(onClick = { showQuality = true }) { Text("Quality") }
+                    TextButton(onClick = onStore) { Text("Store (Wi-Fi)") }
+                },
             )
         },
         floatingActionButton = {
@@ -98,11 +110,11 @@ fun WorldListScreen(
                             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                                 Text(w.name, style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    "${w.points} points · " + DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(w.updatedMs)),
+                                    "${w.points} points" + (if (w.chunks > 0) " · ${w.chunks} mesh blocks" else "") + " · " + DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(w.updatedMs)),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                                 Row {
-                                    TextButton(onClick = { onOpen(w) }, enabled = w.points > 0) { Text("Open") }
+                                    TextButton(onClick = { onOpen(w) }, enabled = w.points > 0 || w.chunks > 0) { Text("Open") }
                                     TextButton(onClick = { renaming = w }) { Text("Rename") }
                                     TextButton(onClick = { deleting = w }) { Text("Delete") }
                                 }
@@ -113,6 +125,8 @@ fun WorldListScreen(
             }
         }
     }
+
+    if (showQuality) QualityDialog(settings) { showQuality = false }
 
     renaming?.let { w ->
         var text by remember(w.id) { mutableStateOf(w.name) }
@@ -133,4 +147,51 @@ fun WorldListScreen(
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
         )
     }
+}
+
+/** Auto / High / Mid / Low choice, plus the last benchmark result and a button to run it again. */
+@Composable
+private fun QualityDialog(settings: TierSettings, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var choice by remember { mutableStateOf(settings.choice) }
+    var summary by remember { mutableStateOf(settings.summary) }
+    var running by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Scan quality") },
+        text = {
+            Column {
+                TierChoice.entries.forEach { c ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { choice = c; settings.choice = c },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = choice == c, onClick = { choice = c; settings.choice = c })
+                        Text(c.label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                Text(
+                    error ?: summary ?: "Not benchmarked yet. The first scan runs a short benchmark.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                TextButton(
+                    enabled = !running,
+                    onClick = {
+                        running = true; error = null
+                        scope.launch {
+                            runCatching { settings.runBenchmark(context) }
+                                .onSuccess { summary = settings.summary }
+                                .onFailure { error = "Benchmark failed: ${it.message}" }
+                            running = false
+                        }
+                    },
+                ) { Text(if (running) "Benchmarking…" else "Re-run benchmark") }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }

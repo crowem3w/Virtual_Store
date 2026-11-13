@@ -73,16 +73,16 @@ worlds/<id>/
 
 ## 8. Phases
 
-### Phase 1: Foundation
+### Phase 1: Foundation (implemented)
 - New screen layout and navigation (world list, live scan).
 - Incremental tracking and sparse map.
 - Live point/voxel view.
 - Autosave and world list.
 
-### Phase 2: Live mesh
-- Chunked fusion and incremental meshing.
-- Vertex-color live rendering.
-- Device tier benchmark.
+### Phase 2: Live mesh (implemented, see PIPELINE.md)
+- Chunked fusion and incremental meshing (16^3-voxel blocks; the 4 m / 8 m chunks of section 4 are a later streaming layer).
+- Vertex-color live rendering (OpenGL ES 3.0).
+- Device tier benchmark with manual override; TSDF chunks saved for Phase 3 resume.
 
 ### Phase 3: Finish
 - Loop closure and pose-graph correction.

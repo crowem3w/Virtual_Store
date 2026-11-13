@@ -19,6 +19,7 @@ import org.opencv.features2d.BFMatcher
 import org.opencv.features2d.ORB
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -79,6 +80,7 @@ class LiveSlam(
     private val depth: DepthEstimator?,
     val cloud: PointCloud,
     private val session: WorldSession,
+    val tier: Tier = Tier.MID,
 ) {
     private class Features(val xy: FloatArray, var desc: Mat?, val pids: IntArray) {
         fun release() { desc?.release(); desc = null }
@@ -92,6 +94,17 @@ class LiveSlam(
     @Volatile var camPose: CamPose? = null; private set
     val hasDepthModel: Boolean get() = depth != null
 
+    /** Chunked TSDF + incremental mesh. Only exists with a depth model (the mesh needs dense depth). */
+    val tsdf: ChunkedTsdf? =
+        if (depth != null) ChunkedTsdf(tier.voxel, File(session.dir, "chunks"), tier.maxBlocksInRam) else null
+    val meshStore = MeshStore()
+    private val mesher: MeshWorker? = if (tsdf != null && tier.liveMesh) MeshWorker(tsdf, meshStore, tier) else null
+    val liveMesh: Boolean get() = mesher != null
+    val triangles: Int get() = meshStore.triangles
+    val blockCount: Int get() = tsdf?.blockCount ?: 0
+
+    init { mesher?.start() }
+
     private var k: Intrinsics? = null
     private var kMat: Mat? = null
     private val orb = ORB.create(1000)
@@ -104,6 +117,7 @@ class LiveSlam(
     private var lostCount = 0
     private var lastKfInliers = 0
     private var lastKfMs = 0L
+    private var lastDepthMs = 0L
     private var lastPose: Pose? = null
 
     private var initFeat: Features? = null
@@ -145,7 +159,8 @@ class LiveSlam(
         initFeat?.release(); initRgba?.release()
         executor.shutdown()
         runCatching { executor.awaitTermination(30, TimeUnit.SECONDS) }
-        session.finish(cloud, kfs.size, align, lastJpeg)
+        mesher?.stop()
+        session.finish(cloud, kfs.size, align, lastJpeg, tsdf, tier)
         kfs.forEach { it.feat.release() }
         depth?.close()
     }
@@ -392,6 +407,10 @@ class LiveSlam(
             rg[i * 3 + j] = s
         }
         camPose = CamPose(rg, pose.t.copyOf(), rotDeg)
+        tsdf?.let {
+            val c = toWorld(pose.center)
+            it.focus = floatArrayOf(c[0].toFloat(), c[1].toFloat(), c[2].toFloat())
+        }
     }
 
     /** Rows (right, down, forward) of the gravity-aligned frame, expressed in the slam frame. */
@@ -421,7 +440,11 @@ class LiveSlam(
             if (pid < 0) continue
             obs.add(doubleArrayOf(xy[2 * q].toDouble(), xy[2 * q + 1].toDouble(), mapXyz[3 * pid], mapXyz[3 * pid + 1], mapXyz[3 * pid + 2]))
         }
-        val skipDepth = pending.get() >= 3 // keep up: the keyframe is still saved, its dense points are skipped
+        // Keep up: the keyframe is still saved, its dense points are skipped. The tier sets the depth rate
+        // (the first two keyframes, the initial pair, always get depth).
+        val nowMs = System.currentTimeMillis()
+        val skipDepth = pending.get() >= 3 || (kfs.size > 2 && nowMs - lastDepthMs < tier.depthIntervalMs)
+        if (!skipDepth) lastDepthMs = nowMs
         pending.incrementAndGet()
         val id = kf.id; val pose = kf.pose; val rot = kf.rotDeg; val kfTotal = kfs.size
         executor.execute { runJob(id, bgr, pose, rot, obs, skipDepth, kfTotal) }
@@ -438,7 +461,8 @@ class LiveSlam(
             val now = System.currentTimeMillis()
             if (now - lastFlushMs > FLUSH_MS) {
                 lastFlushMs = now
-                session.flush(cloud, kfTotal, align)
+                session.flush(cloud, kfTotal, align, tsdf, tier)
+                tsdf?.evictToCap()
             }
         } catch (e: Throwable) {
             Log.w(TAG, "keyframe job failed", e)
@@ -465,28 +489,63 @@ class LiveSlam(
         val a = fit[0]; val b = fit[1]
 
         val px = ByteArray(w * h * 3); bgr.get(0, 0, px)
-        var u = BORDER
-        while (u < w - BORDER) {
-            var v = BORDER
-            while (v < h - BORDER) {
-                val iz = a * disp.sample(u.toFloat() / w, v.toFloat() / h) + b
-                if (iz > 1e-6) {
-                    val z = 1.0 / iz
-                    if (z in MIN_DEPTH..MAX_DEPTH) {
-                        val pc = doubleArrayOf((u - intr.cx) / intr.fx * z, (v - intr.cy) / intr.fy * z, z)
-                        val pw = pose.dirToWorld(pc[0] - pose.t[0], pc[1] - pose.t[1], pc[2] - pose.t[2]) // R^T (pc - t)
-                        val g = toWorld(pw)
-                        val o = (v * w + u) * 3
-                        val color = (0xFF shl 24) or ((px[o + 2].toInt() and 255) shl 16) or
-                            ((px[o + 1].toInt() and 255) shl 8) or (px[o].toInt() and 255)
-                        cloud.add(g[0].toFloat(), g[1].toFloat(), g[2].toFloat(), color)
-                    }
-                }
-                v += STRIDE
+        val stride = tier.pixelStride
+        val gw = (w - 2 * BORDER + stride - 1) / stride
+        val gh = (h - 2 * BORDER + stride - 1) / stride
+        val zs = FloatArray(gw * gh) // metric depth per sample, 0 = invalid
+        for (gy in 0 until gh) for (gx in 0 until gw) {
+            val iz = a * disp.sample((BORDER + gx * stride).toFloat() / w, (BORDER + gy * stride).toFloat() / h) + b
+            zs[gy * gw + gx] = if (iz > 1e-6) (1.0 / iz).toFloat() else 0f
+        }
+
+        val ts = tsdf
+        val rays = if (ts != null) FloatArray(4 * gw * gh) else null
+        val rayCol = if (ts != null) IntArray(gw * gh) else null
+        var nRays = 0
+        val org = toWorld(pose.center)
+
+        for (gy in 0 until gh) for (gx in 0 until gw) {
+            val z = zs[gy * gw + gx].toDouble()
+            if (z < MIN_DEPTH || z > MAX_DEPTH) continue
+            val u = BORDER + gx * stride; val v = BORDER + gy * stride
+            val dcx = (u - intr.cx) / intr.fx; val dcy = (v - intr.cy) / intr.fy
+            val pc = doubleArrayOf(dcx * z, dcy * z, z)
+            val pw = pose.dirToWorld(pc[0] - pose.t[0], pc[1] - pose.t[1], pc[2] - pose.t[2]) // R^T (pc - t)
+            val g = toWorld(pw)
+            val o = (v * w + u) * 3
+            val color = (0xFF shl 24) or ((px[o + 2].toInt() and 255) shl 16) or
+                ((px[o + 1].toInt() and 255) shl 8) or (px[o].toInt() and 255)
+            cloud.add(g[0].toFloat(), g[1].toFloat(), g[2].toFloat(), color)
+
+            // The mesh only takes samples from smooth depth: blurred depth edges would make "flying" surfaces.
+            if (rays != null && rayCol != null && z <= TSDF_MAX_DEPTH && smoothAt(zs, gx, gy, gw, gh)) {
+                val dl = sqrt(dcx * dcx + dcy * dcy + 1.0)
+                val dw = toWorld(pose.dirToWorld(dcx, dcy, 1.0))
+                rays[4 * nRays] = (dw[0] / dl).toFloat()
+                rays[4 * nRays + 1] = (dw[1] / dl).toFloat()
+                rays[4 * nRays + 2] = (dw[2] / dl).toFloat()
+                rays[4 * nRays + 3] = (z * dl).toFloat()
+                rayCol[nRays] = color
+                nRays++
             }
-            u += STRIDE
+        }
+        if (ts != null && rays != null && rayCol != null && nRays > 0) {
+            ts.integrateFrame(org[0].toFloat(), org[1].toFloat(), org[2].toFloat(), rays, rayCol, nRays)
         }
     }
+
+    /** False when a neighbouring depth sample differs by more than 10 %: that is a depth edge, not a surface. */
+    private fun smoothAt(zs: FloatArray, gx: Int, gy: Int, gw: Int, gh: Int): Boolean {
+        val z = zs[gy * gw + gx]
+        val tol = 0.10f * z
+        if (gx > 0 && jump(zs[gy * gw + gx - 1], z, tol)) return false
+        if (gx < gw - 1 && jump(zs[gy * gw + gx + 1], z, tol)) return false
+        if (gy > 0 && jump(zs[(gy - 1) * gw + gx], z, tol)) return false
+        if (gy < gh - 1 && jump(zs[(gy + 1) * gw + gx], z, tol)) return false
+        return true
+    }
+
+    private fun jump(other: Float, z: Float, tol: Float) = other > 0f && abs(other - z) > tol
 
     /** Robust least squares y = a*x + b (two passes, 2.5 sigma clipping). Needs a > 0 and >= 20 points. */
     private fun fitAffine(xs: List<Double>, ys: List<Double>): DoubleArray? {
@@ -563,7 +622,7 @@ class LiveSlam(
         private const val INIT_DEPTH_M = 2.5
         private const val FEATURES_KEPT = 40
         private const val FLUSH_MS = 8_000L
-        private const val STRIDE = 6          // pixels between dense points
+        private const val TSDF_MAX_DEPTH = 6.0 // metres: monocular depth is too noisy beyond this for the mesh
         private const val BORDER = 8
         private const val MIN_DEPTH = 0.3
         private const val MAX_DEPTH = 10.0

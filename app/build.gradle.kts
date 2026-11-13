@@ -61,4 +61,5 @@ dependencies {
     implementation(libs.opencv)
     implementation(libs.tflite)
     debugImplementation(libs.androidx.ui.tooling)
+    testImplementation(libs.junit)
 }

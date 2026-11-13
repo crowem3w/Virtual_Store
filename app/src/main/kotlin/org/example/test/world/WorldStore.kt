@@ -10,12 +10,17 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-data class WorldInfo(val id: String, val name: String, val points: Int, val updatedMs: Long, val dir: File) {
+/** [chunks] = saved TSDF blocks (chunks/*.blk); [voxel] is their voxel size in metres (0 = no TSDF). */
+data class WorldInfo(
+    val id: String, val name: String, val points: Int, val updatedMs: Long, val dir: File,
+    val voxel: Float = 0f, val chunks: Int = 0, val tier: String = "",
+) {
     val thumbnail: File get() = File(dir, "thumbnail.jpg")
     val pointsFile: File get() = File(dir, "points.bin")
+    val chunksDir: File get() = File(dir, "chunks")
 }
 
-/** Saved worlds live in filesDir/worlds/<id>/{meta.json, points.bin, poses.jsonl, keyframes/, thumbnail.jpg}. */
+/** Saved worlds live in filesDir/worlds/<id>/{meta.json, points.bin, chunks/, poses.jsonl, keyframes/, thumbnail.jpg}. */
 class WorldStore(context: Context) {
     private val root = File(context.applicationContext.filesDir, "worlds")
 
@@ -32,12 +37,16 @@ class WorldStore(context: Context) {
         .map { dir ->
             val meta = runCatching { JSONObject(File(dir, "meta.json").readText()) }.getOrNull()
             val pts = File(dir, "points.bin").let { if (it.exists()) (it.length() / PointCloud.RECORD).toInt() else 0 }
+            val nChunks = File(dir, "chunks").list()?.count { it.endsWith(".blk") } ?: 0
             WorldInfo(
                 id = dir.name,
                 name = meta?.optString("name").orEmpty().ifBlank { dir.name },
                 points = pts,
                 updatedMs = meta?.optLong("updated_ms", dir.lastModified()) ?: dir.lastModified(),
                 dir = dir,
+                voxel = meta?.optDouble("voxel", 0.0)?.toFloat() ?: 0f,
+                chunks = nChunks,
+                tier = meta?.optString("tier").orEmpty(),
             )
         }
 
@@ -71,14 +80,15 @@ class WorldSession(val dir: File, private val name: String, private val createdM
         poseLog.appendText(line.toString() + "\n")
     }
 
-    /** Appends points not yet on disk and rewrites meta.json. */
+    /** Appends points not yet on disk, writes changed TSDF blocks, and rewrites meta.json. */
     @Synchronized
-    fun flush(cloud: PointCloud, keyframes: Int, align: DoubleArray?) {
+    fun flush(cloud: PointCloud, keyframes: Int, align: DoubleArray?, tsdf: ChunkedTsdf? = null, tier: Tier? = null) {
         val (bytes, newCount) = cloud.encodeFrom(savedPoints)
         if (bytes.isNotEmpty()) {
             FileOutputStream(File(dir, "points.bin"), true).use { it.write(bytes) }
             savedPoints = newCount
         }
+        tsdf?.saveDirtyBlocks()
         val meta = JSONObject()
             .put("name", existingName())
             .put("created_ms", createdMs)
@@ -87,12 +97,14 @@ class WorldSession(val dir: File, private val name: String, private val createdM
             .put("keyframes", keyframes)
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
         if (align != null) meta.put("align_slam_to_world", JSONArray(align.toList()))
+        if (tsdf != null) meta.put("voxel", tsdf.voxel.toDouble()).put("block", BLOCK)
+        if (tier != null) meta.put("tier", tier.name)
         File(dir, "meta.json").writeText(meta.toString(2))
     }
 
     @Synchronized
-    fun finish(cloud: PointCloud, keyframes: Int, align: DoubleArray?, lastJpeg: ByteArray?) {
-        flush(cloud, keyframes, align)
+    fun finish(cloud: PointCloud, keyframes: Int, align: DoubleArray?, lastJpeg: ByteArray?, tsdf: ChunkedTsdf? = null, tier: Tier? = null) {
+        flush(cloud, keyframes, align, tsdf, tier)
         if (lastJpeg != null) File(dir, "thumbnail.jpg").writeBytes(lastJpeg)
     }
 

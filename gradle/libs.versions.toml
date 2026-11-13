@@ -18,6 +18,7 @@ camerax = "1.4.2"
 # and TensorFlow Lite for the monocular depth model.
 opencv = "4.10.0"
 tflite = "2.16.1"
+junit = "4.13.2"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -35,6 +36,7 @@ androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", versi
 androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 opencv = { module = "org.opencv:opencv", version.ref = "opencv" }
 tflite = { module = "org.tensorflow:tensorflow-lite", version.ref = "tflite" }
+junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

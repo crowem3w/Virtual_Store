@@ -34,6 +34,7 @@ import org.example.test.data.WifiAp
 import org.example.test.ui.theme.TestTheme
 import org.example.test.wifi.WifiScanner
 import org.example.test.world.LiveScanScreen
+import org.example.test.world.TierSettings
 import org.example.test.world.WorldInfo
 import org.example.test.world.WorldStore
 import org.example.test.world.WorldViewScreen
@@ -64,6 +65,7 @@ fun App() {
     val registry = remember { ShopRegistry(context) }
     val scanner = remember { WifiScanner(context) }
     val worldStore = remember { WorldStore(context) }
+    val tierSettings = remember { TierSettings(context) }
 
     var hasPermission by remember { mutableStateOf(context.hasFineLocation()) }
     var hasCamera by remember { mutableStateOf(context.hasCamera()) }
@@ -119,9 +121,11 @@ fun App() {
             onRename = { w, name -> worldStore.rename(w, name); version++ },
             onDelete = { worldStore.delete(it); version++ },
             onStore = { screen = Screen.StoreHome },
+            settings = tierSettings,
         )
         Screen.Live -> LiveScanScreen(
             store = worldStore,
+            settings = tierSettings,
             hasCamera = hasCamera,
             onExit = { version++; screen = Screen.Worlds },
         )
