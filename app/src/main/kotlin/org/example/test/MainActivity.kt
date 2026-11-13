@@ -48,11 +48,11 @@ fun App() {
 
     var hasPermission by remember { mutableStateOf(context.hasFineLocation()) }
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasPermission = granted }
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { hasPermission = context.hasFineLocation() } // Wi-Fi scan results need FINE, not just COARSE
 
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (!hasPermission) permissionLauncher.launch(LOCATION_PERMISSIONS)
     }
 
     var currentShop by remember { mutableStateOf<Shop?>(null) }
@@ -77,11 +77,16 @@ fun App() {
             registry = registry,
             registryVersion = registryVersion,
             onRegistryChanged = { registryVersion++ },
-            onRequestPermission = { permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+            onRequestPermission = { permissionLauncher.launch(LOCATION_PERMISSIONS) },
             onEnter = { currentShop = it },
         )
     }
 }
+
+private val LOCATION_PERMISSIONS = arrayOf(
+    Manifest.permission.ACCESS_FINE_LOCATION,
+    Manifest.permission.ACCESS_COARSE_LOCATION,
+)
 
 private fun Context.hasFineLocation() =
     ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==

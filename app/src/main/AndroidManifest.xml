@@ -4,6 +4,7 @@
     <!-- Wi-Fi scan results (BSSID/RSSI) are only returned with location permission,
          and Location services must also be switched on in system settings. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
