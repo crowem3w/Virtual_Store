@@ -10,7 +10,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** [chunks] = saved TSDF blocks (chunks/*.blk); [voxel] is their voxel size in metres (0 = no TSDF). */
+/** [chunks] = saved TSDF blocks (the .blk files in chunks/); [voxel] is their voxel size in metres (0 = no TSDF). */
 data class WorldInfo(
     val id: String, val name: String, val points: Int, val updatedMs: Long, val dir: File,
     val voxel: Float = 0f, val chunks: Int = 0, val tier: String = "",
