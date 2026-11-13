@@ -44,6 +44,11 @@ class OrientationTracker(context: Context) : SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
+    /** Raw device->world rotation (row-major 3x3, East/North/Up), as delivered by the sensor. */
+    fun rawMatrix(out: FloatArray) {
+        synchronized(r) { r.copyInto(out) }
+    }
+
     /** Fills [out] (row-major 3x3) with the camera rotation in scene axes: Rcam = M * R. */
     fun cameraMatrix(out: FloatArray) {
         synchronized(r) {

@@ -2,6 +2,7 @@ package org.example.test
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Bundle
@@ -21,11 +22,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.location.LocationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.example.test.data.ScanInfo
+import org.example.test.data.ScanStore
 import org.example.test.data.Shop
 import org.example.test.data.ShopRegistry
 import org.example.test.data.WifiAp
@@ -49,6 +53,7 @@ fun App() {
     val context = LocalContext.current
     val registry = remember { ShopRegistry(context) }
     val scanner = remember { WifiScanner(context) }
+    val scanStore = remember { ScanStore(context) }
 
     var hasPermission by remember { mutableStateOf(context.hasFineLocation()) }
     var hasCamera by remember { mutableStateOf(context.hasCamera()) }
@@ -66,6 +71,7 @@ fun App() {
     var currentShop by remember { mutableStateOf<Shop?>(null) }
     var registryVersion by remember { mutableIntStateOf(0) }
     var importStatus by remember { mutableStateOf<String?>(null) }
+    var scanning by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -81,6 +87,19 @@ fun App() {
         }
     }
 
+    fun shareScan(info: ScanInfo) {
+        scope.launch {
+            val zip = withContext(Dispatchers.IO) { scanStore.zip(info, context.cacheDir) }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", zip)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(send, "Share scan"))
+        }
+    }
+
     // Scan only while permitted and while the home screen is visible (saves battery + scan quota).
     val scanFlow = remember(hasPermission, currentShop) {
         if (hasPermission && currentShop == null) scanner.scans() else emptyFlow()
@@ -89,7 +108,9 @@ fun App() {
     val match = remember(scan, registryVersion) { registry.match(scan) }
 
     val shop = currentShop
-    if (shop != null) {
+    if (scanning) {
+        ScanScreen(store = scanStore, wifi = scan, onExit = { scanning = false; registryVersion++ })
+    } else if (shop != null) {
         StoreScreen(shop = shop, registry = registry, hasCamera = hasCamera, onExit = { currentShop = null })
     } else {
         HomeScreen(
@@ -100,6 +121,11 @@ fun App() {
             registry = registry,
             registryVersion = registryVersion,
             onRegistryChanged = { registryVersion++ },
+            hasCamera = hasCamera,
+            scans = remember(registryVersion, scanning) { scanStore.list() },
+            onScan = { scanning = true },
+            onShareScan = ::shareScan,
+            onDeleteScan = { scanStore.delete(it); registryVersion++ },
             importStatus = importStatus,
             onImport = { importLauncher.launch(arrayOf("*/*")) },
             onRemoveImport = { registry.removeScan(); importStatus = null; registryVersion++ },

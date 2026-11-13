@@ -23,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import org.example.test.data.ScanInfo
 import org.example.test.data.Shop
 import org.example.test.data.ShopMatch
 import org.example.test.data.ShopRegistry
@@ -38,6 +39,11 @@ fun HomeScreen(
     registry: ShopRegistry,
     registryVersion: Int,
     onRegistryChanged: () -> Unit,
+    hasCamera: Boolean,
+    scans: List<ScanInfo>,
+    onScan: () -> Unit,
+    onShareScan: (ScanInfo) -> Unit,
+    onDeleteScan: (ScanInfo) -> Unit,
     importStatus: String?,
     onImport: () -> Unit,
     onRemoveImport: () -> Unit,
@@ -93,6 +99,25 @@ fun HomeScreen(
                         // Fallback until QR scanning exists.
                         OutlinedButton(onClick = { onEnter(registry.demoShop) }) {
                             Text(if (registry.hasScan()) "Open scanned store manually" else "Open demo store manually")
+                        }
+                    }
+                }
+            }
+
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Scan your shop", style = MaterialTheme.typography.titleMedium)
+                        Text("Walk slowly through the shop while the app records sharp keyframes, phone orientation and the Wi-Fi fingerprint.")
+                        Button(onClick = onScan, enabled = hasCamera) {
+                            Text(if (hasCamera) "Start new scan" else "Camera permission needed")
+                        }
+                        scans.forEach { info ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${info.id} · ${info.frames} frames", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                                TextButton(onClick = { onShareScan(info) }) { Text("Share") }
+                                TextButton(onClick = { onDeleteScan(info) }) { Text("Delete") }
+                            }
                         }
                     }
                 }

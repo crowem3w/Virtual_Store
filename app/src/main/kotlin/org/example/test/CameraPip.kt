@@ -7,6 +7,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -21,6 +22,11 @@ import androidx.lifecycle.LifecycleOwner
 fun CameraPip(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val shape = RoundedCornerShape(20.dp)
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching { ProcessCameraProvider.getInstance(context).get().unbindAll() }
+        }
+    }
     AndroidView(
         modifier = modifier.clip(shape).border(2.dp, Color.White, shape),
         factory = { ctx ->
