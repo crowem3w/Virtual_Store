@@ -1,11 +1,11 @@
 package org.example.test
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
-import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.location.LocationManager
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,30 +14,29 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.core.location.LocationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.example.test.data.ScanInfo
-import org.example.test.data.ScanStore
+import androidx.compose.runtime.collectAsState
 import org.example.test.data.Shop
 import org.example.test.data.ShopRegistry
 import org.example.test.data.WifiAp
-import org.example.test.recon.ReconService
-import org.example.test.recon.ReconState
 import org.example.test.ui.theme.TestTheme
 import org.example.test.wifi.WifiScanner
+import org.example.test.world.LiveScanScreen
+import org.example.test.world.WorldInfo
+import org.example.test.world.WorldStore
+import org.example.test.world.WorldViewScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,12 +50,20 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private sealed interface Screen {
+    data object Worlds : Screen
+    data object StoreHome : Screen
+    data object Live : Screen
+    data class View(val world: WorldInfo) : Screen
+    data class Store(val shop: Shop) : Screen
+}
+
 @Composable
 fun App() {
     val context = LocalContext.current
     val registry = remember { ShopRegistry(context) }
     val scanner = remember { WifiScanner(context) }
-    val scanStore = remember { ScanStore(context) }
+    val worldStore = remember { WorldStore(context) }
 
     var hasPermission by remember { mutableStateOf(context.hasFineLocation()) }
     var hasCamera by remember { mutableStateOf(context.hasCamera()) }
@@ -66,18 +73,22 @@ fun App() {
         hasPermission = context.hasFineLocation() // Wi-Fi scan results need FINE, not just COARSE
         hasCamera = context.hasCamera()
     }
-
     LaunchedEffect(Unit) {
         if (!hasPermission || !hasCamera) permissionLauncher.launch(APP_PERMISSIONS)
     }
 
-    val reconProgress by ReconState.progress.collectAsState()
-    val reconFinished = reconProgress.values.count { it.done || it.error != null } // re-list scans when a job ends
-    var currentShop by remember { mutableStateOf<Shop?>(null) }
-    var registryVersion by remember { mutableIntStateOf(0) }
+    var screen by remember { mutableStateOf<Screen>(Screen.Worlds) }
+    var version by remember { mutableIntStateOf(0) }
     var importStatus by remember { mutableStateOf<String?>(null) }
-    var scanning by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    // The live scan and the world viewer rotate freely; the first-person store view is portrait only.
+    LaunchedEffect(screen) {
+        (context as? Activity)?.requestedOrientation =
+            if (screen is Screen.Store) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            else ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+    }
+
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -88,71 +99,62 @@ fun App() {
                 onSuccess = { "Imported %.1f MB".format(it / 1_048_576.0) },
                 onFailure = { "Import failed: ${it.message}" },
             )
-            registryVersion++
+            version++
         }
     }
 
-    fun shareScan(info: ScanInfo) {
-        scope.launch {
-            val zip = withContext(Dispatchers.IO) { scanStore.zip(info, context.cacheDir) }
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", zip)
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = "application/zip"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(Intent.createChooser(send, "Share scan"))
-        }
-    }
-
-    // Scan only while permitted and while the home screen is visible (saves battery + scan quota).
-    val scanFlow = remember(hasPermission, currentShop) {
-        if (hasPermission && currentShop == null) scanner.scans() else emptyFlow()
+    // Wi-Fi scanning only while the store home screen is visible (saves battery + scan quota).
+    val scanFlow = remember(hasPermission, screen) {
+        if (hasPermission && screen is Screen.StoreHome) scanner.scans() else emptyFlow()
     }
     val scan by scanFlow.collectAsState(initial = emptyList<WifiAp>())
-    val match = remember(scan, registryVersion) { registry.match(scan) }
+    val match = remember(scan, version) { registry.match(scan) }
 
-    val shop = currentShop
-    if (scanning) {
-        ScanScreen(store = scanStore, wifi = scan, onExit = { scanning = false; registryVersion++ })
-    } else if (shop != null) {
-        StoreScreen(shop = shop, registry = registry, hasCamera = hasCamera, onExit = { currentShop = null })
-    } else {
-        HomeScreen(
+    when (val s = screen) {
+        Screen.Worlds -> WorldListScreen(
+            worlds = remember(version, screen) { worldStore.list() },
+            hasCamera = hasCamera,
+            onNew = { screen = Screen.Live },
+            onOpen = { screen = Screen.View(it) },
+            onRename = { w, name -> worldStore.rename(w, name); version++ },
+            onDelete = { worldStore.delete(it); version++ },
+            onStore = { screen = Screen.StoreHome },
+        )
+        Screen.Live -> LiveScanScreen(
+            store = worldStore,
+            hasCamera = hasCamera,
+            onExit = { version++; screen = Screen.Worlds },
+        )
+        is Screen.View -> WorldViewScreen(info = s.world, onExit = { screen = Screen.Worlds })
+        Screen.StoreHome -> HomeScreen(
             hasPermission = hasPermission,
             locationEnabled = context.isLocationEnabled(),
             scan = scan,
             match = match,
             registry = registry,
-            registryVersion = registryVersion,
-            onRegistryChanged = { registryVersion++ },
-            hasCamera = hasCamera,
-            scans = remember(registryVersion, scanning, reconFinished) { scanStore.list() },
-            onScan = { scanning = true },
-            onShareScan = ::shareScan,
-            onDeleteScan = {
-                if (!ReconState.isRunning(it.id)) { scanStore.delete(it); registryVersion++ }
-            },
-            reconProgress = reconProgress,
-            onProcessScan = { ReconService.start(context, it.id) },
-            onCancelProcess = { ReconService.cancel(context, it.id) },
-            onOpenScan = { currentShop = registry.scanShop(it) },
+            registryVersion = version,
+            onRegistryChanged = { version++ },
             importStatus = importStatus,
             onImport = { importLauncher.launch(arrayOf("*/*")) },
-            onRemoveImport = { registry.removeScan(); importStatus = null; registryVersion++ },
+            onRemoveImport = { registry.removeScan(); importStatus = null; version++ },
             onRequestPermission = { permissionLauncher.launch(APP_PERMISSIONS) },
-            onEnter = { currentShop = it },
+            onEnter = { screen = Screen.Store(it) },
+            onBack = { screen = Screen.Worlds },
+        )
+        is Screen.Store -> StoreScreen(
+            shop = s.shop,
+            registry = registry,
+            hasCamera = hasCamera,
+            onExit = { screen = Screen.StoreHome },
         )
     }
 }
 
-private val APP_PERMISSIONS = buildList {
-    add(Manifest.permission.ACCESS_FINE_LOCATION)
-    add(Manifest.permission.ACCESS_COARSE_LOCATION)
-    add(Manifest.permission.CAMERA)
-    // Android 13+: lets the processing service show its progress notification.
-    if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
-}.toTypedArray()
+private val APP_PERMISSIONS = arrayOf(
+    Manifest.permission.ACCESS_FINE_LOCATION,
+    Manifest.permission.ACCESS_COARSE_LOCATION,
+    Manifest.permission.CAMERA,
+)
 
 private fun Context.hasFineLocation() =
     ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==

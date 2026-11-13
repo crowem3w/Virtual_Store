@@ -77,18 +77,6 @@ class ShopRegistry(context: Context) {
         e.apply()
     }
 
-    /** A shop backed by a scan's own reconstructed .glb (already metric, floor at y = 0). */
-    fun scanShop(info: ScanInfo): Shop = Shop(
-        id = "scan_${info.id}",
-        name = "Scan ${info.id}",
-        description = "Scanned store",
-        modelAsset = "models/demo_shop.glb",
-        bssids = emptySet(),
-        modelFile = info.model.absolutePath,
-        modelScale = prefs.getFloat("scale_scan_${info.id}", 1f),
-        modelYOffset = prefs.getFloat("y_scan_${info.id}", 0f),
-    )
-
     fun shops(): List<Shop> = listOf(demoShop)
 
     /** Dev helper: treat this access point as "inside the demo shop". */
