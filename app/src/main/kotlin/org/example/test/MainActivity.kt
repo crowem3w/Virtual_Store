@@ -47,12 +47,16 @@ fun App() {
     val scanner = remember { WifiScanner(context) }
 
     var hasPermission by remember { mutableStateOf(context.hasFineLocation()) }
+    var hasCamera by remember { mutableStateOf(context.hasCamera()) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
-    ) { hasPermission = context.hasFineLocation() } // Wi-Fi scan results need FINE, not just COARSE
+    ) {
+        hasPermission = context.hasFineLocation() // Wi-Fi scan results need FINE, not just COARSE
+        hasCamera = context.hasCamera()
+    }
 
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(LOCATION_PERMISSIONS)
+        if (!hasPermission || !hasCamera) permissionLauncher.launch(APP_PERMISSIONS)
     }
 
     var currentShop by remember { mutableStateOf<Shop?>(null) }
@@ -67,7 +71,7 @@ fun App() {
 
     val shop = currentShop
     if (shop != null) {
-        StoreScreen(shop = shop, onExit = { currentShop = null })
+        StoreScreen(shop = shop, hasCamera = hasCamera, onExit = { currentShop = null })
     } else {
         HomeScreen(
             hasPermission = hasPermission,
@@ -77,15 +81,16 @@ fun App() {
             registry = registry,
             registryVersion = registryVersion,
             onRegistryChanged = { registryVersion++ },
-            onRequestPermission = { permissionLauncher.launch(LOCATION_PERMISSIONS) },
+            onRequestPermission = { permissionLauncher.launch(APP_PERMISSIONS) },
             onEnter = { currentShop = it },
         )
     }
 }
 
-private val LOCATION_PERMISSIONS = arrayOf(
+private val APP_PERMISSIONS = arrayOf(
     Manifest.permission.ACCESS_FINE_LOCATION,
     Manifest.permission.ACCESS_COARSE_LOCATION,
+    Manifest.permission.CAMERA,
 )
 
 private fun Context.hasFineLocation() =
@@ -94,3 +99,7 @@ private fun Context.hasFineLocation() =
 
 private fun Context.isLocationEnabled(): Boolean =
     LocationManagerCompat.isLocationEnabled(getSystemService(LocationManager::class.java))
+
+private fun Context.hasCamera() =
+    ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+        PackageManager.PERMISSION_GRANTED
