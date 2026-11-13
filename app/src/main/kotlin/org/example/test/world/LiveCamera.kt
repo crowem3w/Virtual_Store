@@ -1,10 +1,9 @@
 package org.example.test.world
 
-import android.content.res.Configuration
+import android.annotation.SuppressLint
 import android.hardware.camera2.CameraCharacteristics
 import android.view.Surface
 import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -72,7 +71,6 @@ class LiveAnalyzer(private val tracker: OrientationTracker) : ImageAnalysis.Anal
 }
 
 /** The small live camera view (preview + analysis bound together). */
-@OptIn(ExperimentalCamera2Interop::class)
 @Composable
 fun LiveCameraPreview(
     analyzer: LiveAnalyzer,
@@ -136,7 +134,7 @@ fun LiveCameraPreview(
     )
 }
 
-@OptIn(ExperimentalCamera2Interop::class)
+@SuppressLint("UnsafeOptInUsageError") // Camera2 interop is only used to read lens data
 private fun readGeometry(camera: Camera): CameraGeometry = try {
     val info = Camera2CameraInfo.from(camera.cameraInfo)
     val f = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()
