@@ -12,6 +12,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -21,7 +22,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.example.test.data.Shop
 import org.example.test.data.ShopRegistry
 import org.example.test.data.WifiAp
@@ -60,18 +64,33 @@ fun App() {
     }
 
     var currentShop by remember { mutableStateOf<Shop?>(null) }
+    var registryVersion by remember { mutableIntStateOf(0) }
+    var importStatus by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) scope.launch {
+            importStatus = "Importing…"
+            val result = withContext(Dispatchers.IO) { registry.importScan(uri) }
+            importStatus = result.fold(
+                onSuccess = { "Imported %.1f MB".format(it / 1_048_576.0) },
+                onFailure = { "Import failed: ${it.message}" },
+            )
+            registryVersion++
+        }
+    }
 
     // Scan only while permitted and while the home screen is visible (saves battery + scan quota).
     val scanFlow = remember(hasPermission, currentShop) {
         if (hasPermission && currentShop == null) scanner.scans() else emptyFlow()
     }
     val scan by scanFlow.collectAsState(initial = emptyList<WifiAp>())
-    var registryVersion by remember { mutableIntStateOf(0) }
     val match = remember(scan, registryVersion) { registry.match(scan) }
 
     val shop = currentShop
     if (shop != null) {
-        StoreScreen(shop = shop, hasCamera = hasCamera, onExit = { currentShop = null })
+        StoreScreen(shop = shop, registry = registry, hasCamera = hasCamera, onExit = { currentShop = null })
     } else {
         HomeScreen(
             hasPermission = hasPermission,
@@ -81,6 +100,9 @@ fun App() {
             registry = registry,
             registryVersion = registryVersion,
             onRegistryChanged = { registryVersion++ },
+            importStatus = importStatus,
+            onImport = { importLauncher.launch(arrayOf("*/*")) },
+            onRemoveImport = { registry.removeScan(); importStatus = null; registryVersion++ },
             onRequestPermission = { permissionLauncher.launch(APP_PERMISSIONS) },
             onEnter = { currentShop = it },
         )

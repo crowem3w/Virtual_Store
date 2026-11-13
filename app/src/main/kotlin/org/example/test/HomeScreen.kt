@@ -38,6 +38,9 @@ fun HomeScreen(
     registry: ShopRegistry,
     registryVersion: Int,
     onRegistryChanged: () -> Unit,
+    importStatus: String?,
+    onImport: () -> Unit,
+    onRemoveImport: () -> Unit,
     onRequestPermission: () -> Unit,
     onEnter: (Shop) -> Unit,
 ) {
@@ -88,7 +91,26 @@ fun HomeScreen(
                             Text("Scanning every 30 s. Pick one of the networks below to register it as the demo shop's signal.")
                         }
                         // Fallback until QR scanning exists.
-                        OutlinedButton(onClick = { onEnter(registry.demoShop) }) { Text("Open demo store manually") }
+                        OutlinedButton(onClick = { onEnter(registry.demoShop) }) {
+                            Text(if (registry.hasScan()) "Open scanned store manually" else "Open demo store manually")
+                        }
+                    }
+                }
+            }
+
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Scanned model", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            if (registry.hasScan()) "Using your imported .glb scan."
+                            else "Using the built-in placeholder. Import a .glb exported from your photogrammetry tool.",
+                        )
+                        importStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = onImport) { Text("Import .glb") }
+                            if (registry.hasScan()) TextButton(onClick = onRemoveImport) { Text("Remove") }
+                        }
                     }
                 }
             }
